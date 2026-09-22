@@ -255,7 +255,7 @@ class EnMAPProcessor:
             attrs={
                 "crs": str(da.rio.crs) if da.rio.crs else None,
                 "crs_wkt": da.rio.crs.to_wkt() if da.rio.crs else None,
-                "transform": da.rio.transform(),
+                "transform": list(da.rio.transform())[:6],
                 "bounds": da.rio.bounds(),
                 "source_file": source_path.name,
                 "sensor": "EnMAP",
