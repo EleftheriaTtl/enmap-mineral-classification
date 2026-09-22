@@ -80,7 +80,12 @@ def mask_for_chip(nc_path: Path, *, tags: dict, all_touched: bool = False) -> np
 
     poly_ll = box(minlon, minlat, maxlon, maxlat)
 
-    gdf = ox.features_from_polygon(poly_ll, tags)
+    try:
+        gdf = ox.features_from_polygon(poly_ll, tags)
+    except Exception as e:  # osmnx raises when no OSM feature matches the tags
+        if "InsufficientResponse" in type(e).__name__ or "No matching features" in str(e):
+            return np.zeros((height, width), dtype=np.uint8)
+        raise
     gdf = gdf[gdf.geometry.notnull()].copy()
     if len(gdf) == 0:
         return np.zeros((height, width), dtype=np.uint8)
