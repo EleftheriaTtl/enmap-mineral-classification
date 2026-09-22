@@ -62,6 +62,8 @@ def save_df_atomic(df: pd.DataFrame, csv_path: Path) -> None:
 
 def challenge_present(sb) -> bool:
     try:
+        if "just a moment" in (sb.get_title() or "").lower():
+            return True
         if sb.is_text_visible("Verify you are human"):
             return True
         if sb.is_text_visible("Large number of pages viewed"):
