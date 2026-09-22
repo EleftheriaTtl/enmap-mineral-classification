@@ -120,6 +120,7 @@ def main() -> None:
     # crawl knobs
     ap.add_argument("--max-pages", type=int, default=50, help="(unused; kept for compatibility)")
     ap.add_argument("--headed", action="store_true", help="Step 00: show the browser (to pass Cloudflare).")
+    ap.add_argument("--xvfb", action="store_true", help="Step 00: headed Chrome in a virtual display (Linux server).")
     ap.add_argument("--max-samples", type=int, default=None,
                     help="Step 01: stop once N localities have a downloaded scene.")
     ap.add_argument("--max-localities", type=int, default=None)
@@ -188,6 +189,8 @@ def main() -> None:
                    "--sleep", str(args.sleep), "--resume"]
             if args.headed:
                 cmd += ["--headed"]
+            if args.xvfb:
+                cmd += ["--xvfb"]
             if args.max_localities is not None:
                 cmd += ["--max-localities", str(args.max_localities)]
             t0 = time.monotonic()
