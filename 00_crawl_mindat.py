@@ -172,6 +172,36 @@ def load_cookies(sb, path: Path) -> None:
     sb.refresh()
 
 
+def wait_for_locality_links(sb, *, timeout: int = 180):
+    """The mineral page is large and loads slowly; poll until locality links appear.
+    Expands the 'Locality List' section and scrolls to trigger lazy loading."""
+    t0 = time.time()
+    clicked = False
+    html, links = "", []
+    while time.time() - t0 < timeout:
+        html = sb.get_page_source()
+        links = extract_locality_links_from_html(html, sb.get_current_url())
+        if links:
+            _log(f"Locality links loaded after {time.time() - t0:.0f}s")
+            return html, links
+        if not clicked:
+            cid = find_locality_container_id_from_html(html)
+            if cid:
+                try:
+                    sb.js_click(f"#collapseb{cid.replace('collapse', '')}")
+                    clicked = True
+                    _log("Expanded the Locality List section")
+                except Exception:
+                    pass
+        try:
+            sb.execute_script("window.scrollTo(0, document.body.scrollHeight);")
+        except Exception:
+            pass
+        _log(f"  waiting for locality list ... ({time.time() - t0:.0f}s, page {len(html)//1000} KB)")
+        time.sleep(5)
+    return html, links
+
+
 def open_mineral_page_from_current(sb, mineral: str, *, pause: float) -> bool:
     """Find and open a /min-XXXX.html link from the current page."""
     soup = BeautifulSoup(sb.get_page_source(), "lxml")
@@ -360,8 +390,7 @@ def crawl(
             _log(f"Wrote debug HTML -> {dbg}")
             raise RuntimeError("Could not find a mineral page link after searching.")
 
-        html = sb.get_page_source()
-        links = extract_locality_links_from_html(html, sb.get_current_url())
+        html, links = wait_for_locality_links(sb, timeout=180)
         if not links:
             dbg = pu.REPO_ROOT / "mindat_debug_mineral_page.html"
             dbg.write_text(html, encoding="utf-8", errors="ignore")
