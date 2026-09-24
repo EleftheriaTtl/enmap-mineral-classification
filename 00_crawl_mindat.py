@@ -62,6 +62,8 @@ def save_df_atomic(df: pd.DataFrame, csv_path: Path) -> None:
 
 def challenge_present(sb) -> bool:
     try:
+        if "just a moment" in (sb.get_title() or "").lower():
+            return True
         if sb.is_text_visible("Verify you are human"):
             return True
         if sb.is_text_visible("Large number of pages viewed"):
@@ -82,6 +84,9 @@ def challenge_present(sb) -> bool:
     return False
 
 
+XVFB = False
+
+
 def wait_until_home_ready(sb, *, headed: bool, overall_timeout: int = 180) -> None:
     start = time.time()
     sb.uc_open_with_reconnect("https://www.mindat.org/", 3)
@@ -92,6 +97,15 @@ def wait_until_home_ready(sb, *, headed: bool, overall_timeout: int = 180) -> No
             return
         except Exception:
             pass
+
+        if challenge_present(sb) and XVFB:
+            _log("Cloudflare challenge -> clicking it (xvfb) ...")
+            try:
+                sb.uc_gui_click_captcha()
+            except Exception as e:
+                _log(f"  captcha click failed: {e!r}")
+            time.sleep(3)
+            continue
 
         if challenge_present(sb):
             if not headed:
@@ -330,7 +344,8 @@ def crawl(
 
     out_csv.parent.mkdir(parents=True, exist_ok=True)
 
-    with SB(uc=True, headed=headed, headless=(not headed)) as sb:
+    sb_kwargs = dict(uc=True, xvfb=True) if XVFB else dict(uc=True, headed=headed, headless=(not headed))
+    with SB(**sb_kwargs) as sb:
         if cookies_path and cookies_path.exists():
             _log(f"Loading cookies from {cookies_path} ...")
             load_cookies(sb, cookies_path)
@@ -441,9 +456,12 @@ def main() -> None:
     ap.add_argument("--cookies", default=None, help="Cookie jar path (pickle). Loaded if exists; saved in headed mode.")
     ap.add_argument("--headed", action="store_true", help="Show browser (needed to solve challenges).")
     ap.add_argument("--resume", action="store_true")
+    ap.add_argument("--xvfb", action="store_true")
     ap.add_argument("--out", default=None, help="Override output CSV path.")
     args = ap.parse_args()
 
+    global XVFB
+    XVFB = bool(args.xvfb)
     out_csv = Path(args.out) if args.out else pu.localities_csv(args.mineral)
     cookies_path = Path(args.cookies) if args.cookies else None
     n = crawl(

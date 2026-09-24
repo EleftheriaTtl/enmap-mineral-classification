@@ -119,6 +119,9 @@ def main() -> None:
     ap.add_argument("--mineral", required=True)
     # crawl knobs
     ap.add_argument("--max-pages", type=int, default=50)
+    ap.add_argument("--headed", action="store_true")
+    ap.add_argument("--xvfb", action="store_true")
+    ap.add_argument("--max-samples", type=int, default=None)
     ap.add_argument("--max-localities", type=int, default=None)
     ap.add_argument("--sleep", type=float, default=1.5)
     # stac knobs
@@ -182,8 +185,11 @@ def main() -> None:
         # 00 crawl
         if "00" not in skip:
             cmd = [PY, "-u", str(script("00_crawl_mindat.py")), "--mineral", args.mineral,
-                   "--sleep", str(args.sleep), "--max-pages", str(args.max_pages),
-                   "--resume"]
+                   "--sleep", str(args.sleep), "--resume"]
+            if args.headed:
+                cmd += ["--headed"]
+            if args.xvfb:
+                cmd += ["--xvfb"]
             if args.max_localities is not None:
                 cmd += ["--max-localities", str(args.max_localities)]
             t0 = time.monotonic()
@@ -196,6 +202,8 @@ def main() -> None:
         if "01" not in skip:
             cmd = [PY, "-u", str(script("01_stac_search_download.py")), "--mineral", args.mineral,
                    "--cloud-max", str(args.cloud_max)]
+            if args.max_samples:
+                cmd += ["--target", str(args.max_samples)]
             if args.start:
                 cmd += ["--start", args.start]
             if args.end:

@@ -254,6 +254,7 @@ def run(
     collection: str,
     skip_download: bool,
     limit: Optional[int] = None,
+    target: Optional[int] = None,
 ) -> None:
     _log("loading .env ...")
     pu.load_dotenv()
@@ -319,6 +320,7 @@ def run(
         _log(f"--limit {limit}  -> processing first {len(df)} localities only")
 
     matches: list[dict] = []
+    n_ok = 0
     pipeline_t0 = time.monotonic()
     n = len(df)
     for i, row in df.reset_index(drop=True).iterrows():
@@ -326,12 +328,17 @@ def run(
         lat, lon = float(row["lat"]), float(row["lon"])
         row_t0 = time.monotonic()
 
+        if target and n_ok >= target:
+            _log(f"target reached ({n_ok}/{target}) -> stopping")
+            break
+
         # Heartbeat BEFORE any network call so the user always knows where we are.
         _log(f"{i+1}/{n} START  {name!r}  @ lat={lat:.5f},lon={lon:.5f}")
 
         if name in prev and str(prev[name].get("status", "")) == "downloaded":
             _log(f"{i+1}/{n} SKIP   already downloaded ({prev[name].get('scene_id')})")
             matches.append(prev[name])
+            n_ok += 1
             continue
 
         try:
@@ -412,8 +419,14 @@ def run(
         try:
             # Prefer the GeoServer download helper: it handles SSO redirects and
             # writes a stable <item_id>.zip with EnMAP-like filenames inside.
-            ok = gsd.download_item(item, raw, username=user, password=pwd, logger=None)
+            existing = raw / f"{item.get('id')}.zip"
+            if existing.exists() and existing.stat().st_size > 0:
+                _log(f"      reuse   {existing.name}")
+                ok = True
+            else:
+                ok = gsd.download_item(item, raw, username=user, password=pwd, logger=None)
             if ok:
+                n_ok += 1
                 rec["status"] = "downloaded"
                 rec["raw_path"] = str((raw / f"{item.get('id')}.zip").relative_to(pu.REPO_ROOT))
             else:
@@ -498,6 +511,7 @@ def main() -> None:
         default=None,
         help="Only process the first N localities (debug / sanity-check).",
     )
+    ap.add_argument("--target", type=int, default=None, help="Stop once N localities have a downloaded scene.")
     args = ap.parse_args()
 
     run(
@@ -509,6 +523,7 @@ def main() -> None:
         collection=args.collection,
         skip_download=args.skip_download,
         limit=args.limit,
+        target=args.target,
     )
 
 
