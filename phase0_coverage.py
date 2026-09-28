@@ -189,11 +189,13 @@ def harvest(args) -> None:
          f"({args.start}..{args.end})")
 
     t0 = time.monotonic()
+    consec_fail = 0
     with _open(out, mode) as fh, httpx.Client(timeout=120) as client:
         if mode == "w":
             fh.write("scene_id,datetime,cloud,quality,wkt\n")
         for i, c in enumerate(todo, 1):
             got = 0
+            ok = False
             for attempt in range(1, args.retries + 1):
                 try:
                     for f in page_tile(client, c["bbox"], start=args.start, end=args.end,
@@ -209,12 +211,25 @@ def harvest(args) -> None:
                         got += 1
                         fh.write(f'{sid},{dt},{"" if cc is None else cc},'
                                  f'{"" if q is None else q},"{wkt}"\n')
+                    ok = True
                     break
                 except Exception as e:
+                    msg = str(e)
+                    if "recovery mode" in msg or "NoApplicableCode" in msg:
+                        _log("  the STAC catalogue reports a server-side database failure "
+                             "(recovery mode). Stopping; rerun later, progress is saved.")
+                        return
                     if attempt == args.retries:
                         _log(f"  tile {c['name']}: giving up after {attempt} tries ({e!r})")
                     else:
-                        time.sleep(2 * attempt)
+                        time.sleep(args.backoff * attempt)
+            consec_fail = 0 if ok else consec_fail + 1
+            if consec_fail >= args.max_consecutive_failures:
+                _log(f"  {consec_fail} tiles failed in a row -> stopping. Check the server, "
+                     f"then rerun (finished tiles are skipped).")
+                return
+            if args.sleep:
+                time.sleep(args.sleep)
             done.add(c["name"])
             fh.flush()
             state_path.write_text(json.dumps({"done": sorted(done)}))
@@ -402,6 +417,9 @@ def main() -> None:
     h.add_argument("--start", default="2022-04-01")
     h.add_argument("--end", default=datetime.now().strftime("%Y-%m-%d"))
     h.add_argument("--retries", type=int, default=3)
+    h.add_argument("--backoff", type=float, default=5.0, help="seconds, times the attempt number")
+    h.add_argument("--sleep", type=float, default=0.5, help="pause between tiles; easier on the server")
+    h.add_argument("--max-consecutive-failures", type=int, default=5)
     h.add_argument("--restart", action="store_true", help="ignore saved tile progress")
     h.set_defaults(func=harvest)
 
