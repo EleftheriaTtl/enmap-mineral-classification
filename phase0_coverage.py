@@ -260,9 +260,10 @@ def join(args) -> None:
     fp, geoms = fp[ok].reset_index(drop=True), geoms[ok]
     cloud = pd.to_numeric(fp["cloud"], errors="coerce").to_numpy()
     qual = pd.to_numeric(fp["quality"], errors="coerce").to_numpy()
-    usable_scene = (cloud <= args.cloud_max) & ((qual == 0) | np.isnan(qual))
+    usable_scene = (cloud <= args.cloud_max) & ((qual <= args.max_quality) | np.isnan(qual))
+    qlabel = {0: "nominal", 1: "nominal or reduced", 2: "any"}.get(args.max_quality, f"quality <= {args.max_quality}")
     _log(f"{len(fp)} scenes ({int(np.nansum(usable_scene))} usable: "
-         f"cloud <= {args.cloud_max}%, nominal quality)")
+         f"cloud <= {args.cloud_max}%, {qlabel} quality)")
 
     _log(f"reading {args.sites}")
     sites = pd.read_csv(args.sites)
@@ -334,6 +335,7 @@ def join(args) -> None:
         "covered_usable": int((cov.covered_usable).sum()),
         "scenes_with_sites": int(len(grp)),
         "cloud_max": args.cloud_max,
+        "max_quality": args.max_quality,
         "generated": datetime.now().isoformat(timespec="seconds"),
     }
     (out_dir / "funnel.json").write_text(json.dumps(stats, indent=2))
@@ -359,7 +361,7 @@ def funnel_text(s: dict, grp=None) -> str:
     lines = [
         "# Phase 0 funnel — EnMAP coverage of Mindat mine sites",
         "",
-        f"Generated {s['generated']}. Usable = cloud <= {s['cloud_max']}% and nominal quality.",
+        f"Generated {s['generated']}. Usable = cloud <= {s['cloud_max']}% and "f"{ {0: 'nominal', 1: 'nominal or reduced', 2: 'any'}.get(s.get('max_quality', 0), 'nominal') } quality.",
         "",
         "| Stage | Count | Of previous |",
         "|---|---:|---:|",
@@ -428,6 +430,8 @@ def main() -> None:
     j.add_argument("--footprints", default="data/footprints.csv.gz")
     j.add_argument("--out-dir", default="data/coverage")
     j.add_argument("--cloud-max", type=float, default=10.0)
+    j.add_argument("--max-quality", type=int, default=0, choices=[0, 1, 2],
+                   help="0 nominal only, 1 also reduced, 2 anything")
     j.add_argument("--localities", type=int, default=451221)
     j.add_argument("--id-col", default="site_id")
     j.add_argument("--lat-col", default="lat")
