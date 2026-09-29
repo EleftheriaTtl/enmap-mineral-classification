@@ -52,6 +52,8 @@ def _log(msg: str) -> None:
 
 def thin(df: pd.DataFrame, metres: float, rank: np.ndarray) -> pd.DataFrame:
     """Keep one site per ~metres grid cell; highest rank wins."""
+    if metres <= 0:                      # thinning off: every site is its own sample
+        return df.reset_index(drop=True)
     lat = df["lat"].to_numpy()
     lon = df["lon"].to_numpy()
     dlat = metres / 111_320.0
