@@ -112,7 +112,13 @@ def main() -> None:
     sites = pd.read_csv(args.sites, low_memory=False)
     id_col = "site_id" if "site_id" in sites.columns else sites.columns[0]
     n_min = pd.to_numeric(sites.get("n_minerals"), errors="coerce").fillna(0).to_numpy()
-    minerals = dict(zip(sites[id_col], sites[args.name_col].fillna("")))
+    if args.name_col in sites.columns:
+        minerals = dict(zip(sites[id_col], sites[args.name_col].fillna("")))
+    else:
+        alt = next((c for c in ("mineral_names", "geomaterials", "minerals") if c in sites.columns), None)
+        if alt:
+            _log(f"no column {args.name_col!r}; using {alt!r} for mineral names")
+        minerals = dict(zip(sites[id_col], sites[alt].fillna(""))) if alt else {}
     rank_by_id = dict(zip(sites[id_col], n_min))
 
     labelled: set[str] | None = None
