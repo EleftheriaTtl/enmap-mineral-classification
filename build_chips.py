@@ -169,6 +169,8 @@ def main() -> None:
     ap.add_argument("--shard", default=None, help="i/n: take every n-th scene, offset i")
     ap.add_argument("--max-gb", type=float, default=130.0, help="stop when the dataset reaches this")
     ap.add_argument("--keep-zips", action="store_true")
+    ap.add_argument("--max-net-failures", type=int, default=3,
+                    help="stop after this many consecutive network errors")
     args = ap.parse_args()
 
     pu.load_dotenv()
@@ -206,6 +208,7 @@ def main() -> None:
     glog = gsd.get_logger(level=logging.WARNING)
 
     rows = []
+    consec_net = 0
     t0 = time.monotonic()
     for k, sid in enumerate(scenes, 1):
         if done.get(sid) == "ok":
@@ -236,8 +239,17 @@ def main() -> None:
             raise
         except Exception as e:
             rows.append({"scene_id": sid, "status": "error", "chips": 0, "error": repr(e)[:300]})
-            _log(f"      ERROR {e!r}")
-            traceback.print_exc()
+            name = type(e).__name__
+            if "Timeout" in name or "Connect" in name or "Network" in name:
+                consec_net += 1
+                _log(f"      network error ({name}); {consec_net} in a row")
+                if consec_net >= args.max_net_failures:
+                    _log("stopping: the catalogue is unreachable. Progress is saved; rerun later.")
+                    break
+            else:
+                consec_net = 0
+                _log(f"      ERROR {e!r}")
+                traceback.print_exc()
         if len(rows) >= 5:
             pd.DataFrame(rows).to_csv(manifest_path, mode="a", header=not manifest_path.exists(), index=False)
             rows = []
