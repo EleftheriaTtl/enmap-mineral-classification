@@ -249,6 +249,11 @@ def main() -> None:
     ap.add_argument("--priority", default="data/coverage_v2_c50q2/scene_priority.csv")
     ap.add_argument("--scene-groups", default="data/coverage_v2_c50q2/scene_groups.csv")
     ap.add_argument("--sites", default="data/sites_v2.csv")
+    ap.add_argument("--assign", default=None,
+                    help="site_season.csv (site_id, chosen_scene): cut each site "
+                         "from exactly one scene. Without it, scene_groups is used "
+                         "and a site inside several chosen scenes is chipped once "
+                         "per scene.")
     ap.add_argument("--out-dir", default="data/chips")
     ap.add_argument("--chip-px", type=int, default=64)
     ap.add_argument("--version", default="128", choices=["v1", "128", "58"])
@@ -290,12 +295,28 @@ def main() -> None:
     out_dir.mkdir(parents=True, exist_ok=True)
 
     pri = pd.read_csv(args.priority)
-    grp = pd.read_csv(args.scene_groups).set_index("scene_id")["site_ids"].to_dict()
+    if args.assign:
+        a = pd.read_csv(args.assign)
+        a["site_id"] = a.site_id.astype(str)
+        grp = (a.groupby("chosen_scene")["site_id"]
+                .apply(lambda s: ";".join(s.tolist())).to_dict())
+        _log(f"assignment: {len(a):,} sites over {len(grp):,} scenes, one scene each")
+    else:
+        grp = pd.read_csv(args.scene_groups).set_index("scene_id")["site_ids"].to_dict()
+        _log("no --assign: a site inside several chosen scenes will be chipped "
+             "once per scene (duplicates)")
     sites = pd.read_csv(args.sites, low_memory=False)
     sites["site_id"] = sites.site_id.astype(str)
     by_id = sites.set_index("site_id")
 
     scenes = pri.scene_id.tolist()
+    if args.assign:                          # keep priority order, drop empties,
+        keep = set(grp)                      # then append assigned scenes not listed
+        scenes = [s for s in scenes if s in keep]
+        extra = [s for s in grp if s not in set(scenes)]
+        if extra:
+            _log(f"{len(extra):,} assigned scenes absent from the priority list; appending")
+            scenes += extra
     if args.shard:
         i, n = (int(v) for v in args.shard.split("/"))
         scenes = scenes[i::n]
