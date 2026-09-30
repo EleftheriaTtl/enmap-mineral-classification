@@ -47,9 +47,15 @@ import pandas as pd
 BASE = "https://download.geoservice.dlr.de/ENMAP/files/L2A"
 NODATA = -9999
 
-# quality layers used to mark a pixel unusable
+# quality layers. All five are READ and STORED per chip; only the ones named by
+# --mask-layers are folded into `valid`. Keeping the raw layers means a masking
+# decision can be revisited without rebuilding the dataset.
 QUALITY_ASSETS = ("QL_QUALITY_CLOUD", "QL_QUALITY_CLOUDSHADOW", "QL_QUALITY_HAZE",
                   "QL_QUALITY_CIRRUS", "QL_QUALITY_SNOW")
+SHORT = {"cloud": "QL_QUALITY_CLOUD", "cloudshadow": "QL_QUALITY_CLOUDSHADOW",
+         "haze": "QL_QUALITY_HAZE", "cirrus": "QL_QUALITY_CIRRUS",
+         "snow": "QL_QUALITY_SNOW"}
+LONG = {v: k for k, v in SHORT.items()}
 
 
 def _log(msg: str) -> None:
@@ -138,7 +144,8 @@ def band_plan(meta_url: str, version: str) -> tuple[np.ndarray, np.ndarray]:
 
 # ---------------------------------------------------------------------------
 def process_scene(scene_id: str, sites: pd.DataFrame, *, out_dir: Path, chip_px: int,
-                  version: str, max_patch_cloud: float, verbose: bool) -> tuple[int, int, int, str]:
+                  version: str, max_patch_cloud: float, mask_layers: tuple[str, ...],
+                  min_valid: float, verbose: bool) -> tuple[int, int, int, str]:
     """Returns (written, skipped_edge, skipped_cloud, error)."""
     import rasterio
     from rasterio.windows import Window
@@ -169,35 +176,56 @@ def process_scene(scene_id: str, sites: pd.DataFrame, *, out_dir: Path, chip_px:
                     continue
                 win = Window(c0, r0, chip_px, chip_px)
 
-                bad = np.zeros((chip_px, chip_px), dtype=bool)
-                cloud_frac = 0.0
+                # read every quality layer raw; decide what counts as bad after
+                qvals: dict[str, np.ndarray] = {}
                 for a, q in quality.items():
-                    m = q.read(1, window=win) != 0
-                    if a == "QL_QUALITY_CLOUD":
-                        cloud_frac = float(m.mean())
-                    bad |= m
+                    qvals[a] = q.read(1, window=win).astype(np.uint8)
+                cl = qvals.get("QL_QUALITY_CLOUD")
+                cloud_frac = float((cl != 0).mean()) if cl is not None else 0.0
                 if cloud_frac > max_patch_cloud:
                     skip_cloud += 1
                     if verbose:
                         _log(f"      {s.site_id}: patch cloud {cloud_frac:.0%}, skipped")
                     continue
 
-                X = src.read(bands.tolist(), window=win).astype(np.int16)
-                X[:, bad] = NODATA
+                X = src.read(bands.tolist(), window=win)
+                nd = src.nodatavals[0] if src.nodatavals else None
+                bad = ((X == nd).all(axis=0) if nd is not None
+                       else np.zeros((chip_px, chip_px), dtype=bool))
+                for name in mask_layers:
+                    a = SHORT[name]
+                    if a in qvals:
+                        bad |= qvals[a] != 0
                 valid = (~bad).astype(np.uint8)
+                vfrac = float(valid.mean())
+                if vfrac < min_valid:
+                    skip_cloud += 1
+                    if verbose:
+                        _log(f"      {s.site_id}: valid {vfrac:.0%} < {min_valid:.0%}, skipped")
+                    continue
+
+                # X stays as the sensor gave it; `valid` says which pixels to trust
+                names = [LONG[a] for a in QUALITY_ASSETS if a in qvals]
+                qmask = (np.stack([qvals[SHORT[n]] for n in names]) if names
+                         else np.zeros((0, chip_px, chip_px), dtype=np.uint8))
+                pfrac = np.array([float((qvals[SHORT[n]] != 0).mean()) for n in names],
+                                 dtype=np.float32)
 
                 scene_dir.mkdir(parents=True, exist_ok=True)
                 np.savez_compressed(
-                    out, X=X, valid=valid, wavelength=wl.astype(np.float32),
+                    out, X=X.astype(np.int16), valid=valid, wavelength=wl.astype(np.float32),
                     site_id=str(s.site_id), lat=float(s.lat), lon=float(s.lon),
                     scene_id=scene_id, minerals=str(s.get("geomaterials", "")),
                     patch_cloud=np.float32(cloud_frac),
+                    qmask=qmask, qmask_names=np.array(names), patch_frac=pfrac,
+                    mask_layers=np.array(list(mask_layers)),
                     scale_factor=np.float32(1e-4), nodata=np.int16(NODATA),
                 )
                 written += 1
                 if verbose:
+                    flag = " ".join(f"{n[:5]} {f:.0%}" for n, f in zip(names, pfrac) if f > 0)
                     _log(f"      {s.site_id}: {X.shape}, cloud {cloud_frac:.0%}, "
-                         f"valid {valid.mean():.0%}")
+                         f"valid {vfrac:.0%}" + (f"  [{flag}]" if flag else ""))
         finally:
             for q in quality.values():
                 q.close()
@@ -226,6 +254,12 @@ def main() -> None:
     ap.add_argument("--version", default="128", choices=["v1", "128", "58"])
     ap.add_argument("--max-patch-cloud", type=float, default=0.2,
                     help="skip a chip when this fraction of its pixels is cloud")
+    ap.add_argument("--mask-layers", default="cloud,cloudshadow",
+                    help="comma list folded into `valid`: "
+                         "cloud,cloudshadow,haze,cirrus,snow or 'none'. "
+                         "All five are stored raw in `qmask` either way.")
+    ap.add_argument("--min-valid", type=float, default=0.5,
+                    help="skip a chip whose valid fraction falls below this")
     ap.add_argument("--limit", type=int, default=None)
     ap.add_argument("--shard", default=None, help="i/n")
     ap.add_argument("--max-gb", type=float, default=130.0)
@@ -234,10 +268,17 @@ def main() -> None:
     ap.add_argument("--verbose", action="store_true")
     args = ap.parse_args()
 
+    raw = [x.strip().lower() for x in args.mask_layers.split(",") if x.strip()]
+    mask_layers: tuple[str, ...] = () if raw == ["none"] else tuple(raw)
+    unknown = [x for x in mask_layers if x not in SHORT]
+    if unknown:
+        sys.exit(f"--mask-layers: unknown {unknown}; pick from {sorted(SHORT)} or 'none'")
+
     import pipeline_utils as pu
     pu.load_dotenv()
     if not (os.environ.get("ENMAP_USERNAME") and os.environ.get("ENMAP_PASSWORD")):
         sys.exit("ENMAP_USERNAME / ENMAP_PASSWORD not set in .env")
+    _log(f"masking on {list(mask_layers) or 'nothing'}; all 5 layers stored per chip")
 
     os.environ.setdefault("GDAL_DISABLE_READDIR_ON_OPEN", "EMPTY_DIR")
     os.environ.setdefault("CPL_VSIL_CURL_ALLOWED_EXTENSIONS", ".TIF,.XML")
@@ -293,6 +334,8 @@ def main() -> None:
             w, se, sc, err = process_scene(sid, want, out_dir=out_dir, chip_px=args.chip_px,
                                            version=args.version,
                                            max_patch_cloud=args.max_patch_cloud,
+                                           mask_layers=mask_layers,
+                                           min_valid=args.min_valid,
                                            verbose=args.verbose)
             n_chips_total += w
             rows.append({"scene_id": sid, "status": "ok" if not err else "error",
