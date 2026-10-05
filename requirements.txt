@@ -1,31 +1,25 @@
-# Core scientific stack
+# Step 1 and 2 (the dataset itself)
 numpy
 pandas
-matplotlib
+httpx                 # Mindat API, EnMAP metadata
+rasterio              # COG range reads over /vsicurl/
+shapely>=2.0          # STRtree spatial join
+pyproj                # lon/lat -> scene CRS
+affine
 
-# Geospatial
-xarray
-rioxarray
-rasterio
-pyproj
-shapely
+# Step 3 (optional: the OSM segmentation subset)
 geopandas
 osmnx
-netCDF4
 
-# Crawl + STAC
-requests
-beautifulsoup4
+# Notebooks
+matplotlib
+pyarrow               # optional: data/sites.parquet; the code skips it if absent
 
-# Mindat scrape (optional, browser-based; recommended when Cloudflare blocks requests-only)
-# seleniumbase
-# lxml
-
-# GeoServer EnMAP download (SSO cookies)
-httpx
-
-# Optional: .env loader for geoserver_download.py
-python-dotenv
-
-# Optional: nicer .env loading (pipeline_utils ships a tiny built-in fallback)
-# python-dotenv
+# legacy/ only — not needed by code/
+# xarray
+# rioxarray
+# netCDF4
+# seleniumbase        # the old browser-based Mindat crawl
+# beautifulsoup4
+# requests
+# python-dotenv       # common.py ships a small .env reader of its own

@@ -1,210 +1,138 @@
-# enmap-mineral-classification
+# EnMAP mineral classification dataset
 
-End-to-end pipeline to build a **segmentation-ready dataset** from EnMAP L2A
-hyperspectral scenes around mine localities for a given mineral:
+A multi-label hyperspectral dataset for mineral classification: one 64×64
+EnMAP SWIR chip per Mindat mine locality, labelled with the minerals recorded
+there. Optionally, a segmentation subset for the chips whose mining ground
+OpenStreetMap has mapped.
 
-- Find mine localities (lat/lon) for a mineral
-- Search EnMAP L2A STAC and download scenes
-- Convert each scene into a georeferenced reflectance cube (NetCDF)
-- Clip per-mine chips
-- Create OpenStreetMap mine/quarry masks aligned to each chip
-- Package `(X, y, wavelength, metadata)` into ML-ready `.npz` samples
-
-## What you get (high level)
-
-Given a mineral (e.g. `magnesite`), the pipeline produces a folder:
-
-`data/<mineral>/dataset/`
-
-containing:
-
-- `manifest.csv` (one row per sample)
-- `samples/<chip_id>.npz` where each `.npz` includes:
-  - `X`: reflectance cube, shape `(B, H, W)` float32
-  - `y`: OSM mask, shape `(H, W)` uint8 (0 background, 1 mine/quarry)
-  - `wavelength`: shape `(B,)` float32 (nm)
-  - plus identifiers like `chip_id`, `mine_name`, `scene_id`, `height`, `width`
-
-## Pipeline steps
+Three steps. One script per step, one notebook per script.
 
 ```
-00_crawl_mindat.py            crawl Mindat for localities of <mineral>
-01_stac_search_download.py    STAC search + download EnMAP L2A scenes
-02_enmap_process.py           EnMAP archives -> full-scene NetCDF (reflectance + wavelengths)
-03_clip_mines.py              clip per-mine chips (buffer in meters or fixed chip_px)
-04_osm_mask_batch.py          OSM mine/quarry masks for each chip
-05_build_dataset.py           chips + masks -> ML-ready .npz dataset
-run_pipeline.py               run the whole pipeline for one mineral
+code/      01_mindat_dataset.py   02_enmap_chips.py   03_osm_segmentation.py
+notebooks/ 01_mindat_dataset.ipynb 02_enmap_chips.ipynb 03_osm_segmentation.ipynb
+data/      raw/ sites.csv labels/ interim/ chips/ seg/ reports/
+legacy/    the earlier scripts, kept for reference and not imported
 ```
 
-## On-disk layout
+The scripts do the work and write files. The notebooks only read those files —
+they never fetch, never rebuild, and are safe to re-run at any time. Every
+stage writes `data/reports/<name>.json` and `.md`, which is what the notebooks
+read.
 
-Everything for one mineral lives under `data/<mineral>/`:
+## The three steps
 
-```
-data/
-  magnesite/
-    localities.csv            # 00 output
-    stac_matches.csv          # 01 output (1 best scene per mine)
-    raw/                      # 01 output: downloaded EnMAP L2A archives
-    netcdf/                   # 02 output: full-scene NetCDFs
-    chips/<mine>/             # 03 output: clipped NetCDF + RGB png + .npy
-    masks/<mine>/             # 04 output: OSM mine/quarry masks (uint8)
-    dataset/                  # 05 output: ML-ready dataset
-      manifest.csv
-      samples/<chip_id>.npz   # X, y, wavelength, scene_id, mine_name, ...
+### 1. The point set — `code/01_mindat_dataset.py`
+
+Everything Mindat has, cleaned into one table with a mineral list per point.
+
+```bash
+python code/01_mindat_dataset.py --stage all
 ```
 
-`new_enmap.py` (the `EnMAPProcessor` class) stays at the repo root. Old
-versions of the scripts and the exploratory notebooks have been moved to
-`legacy/` and the previously hand-crawled CSVs are in `legacy/sample_csvs/`.
+| Stage | What it does |
+|---|---|
+| `dump` | pull the Mindat API into `data/raw/`; skipped if the dump is there |
+| `clean` | → `data/sites.csv`: drop points with no coordinates, drop the `(0,0)` placeholder, drop points with no minerals, merge localities at the same position, annotate locality type and an `is_mine` flag |
+| `labels` | count minerals, sweep the vocabulary threshold → `data/labels/` |
+
+Two deliberate decisions: **the mineral list is the label**, so a point without
+one is dropped; and **locality type filters nothing** — a point typed
+"mountain" can carry a real mineral list, so the type is recorded as a flag
+instead. Positions are merged because a 64 px chip at 30 m spans ~1.9 km: two
+localities a metre apart are the same pixels, and keeping both would put
+identical imagery under two labels and the same ground in two splits.
+
+### 2. The labelled dataset — `code/02_enmap_chips.py`
+
+For each site, find the EnMAP scene covering it, cut 64×64, save it with its
+label.
+
+```bash
+python code/02_enmap_chips.py --stage footprints      # ~1 h, once
+python code/02_enmap_chips.py --stage match
+python code/02_enmap_chips.py --stage chips --limit 2 --verbose   # try it
+for i in 0 1 2 3; do tmux new -d -s c$i \
+  "python code/02_enmap_chips.py --stage chips --shard $i/4 2>&1 | tee -a chips$i.log"; done
+python code/02_enmap_chips.py --stage index
+```
+
+| Stage | What it does |
+|---|---|
+| `footprints` | harvest every EnMAP L2A footprint from the DLR STAC catalogue → `data/interim/footprints.csv.gz`. Resumable by 10° tile |
+| `match` | spatial join sites × footprints, then pick which single scene each site is cut from → `data/interim/site_scene.csv` |
+| `chips` | read the scenes' COGs over HTTP range requests, cut the windows → `data/chips/<scene>/<site>.npz`. Resumable, shardable |
+| `index` | → `data/chips/index.csv`, one row per chip; recount the vocabulary over what was built |
+
+**Why range reads.** The assets are Cloud-Optimized GeoTIFFs in 512×512
+pixel-interleaved tiles, so one tile carries every band: the first chip in a
+tile costs ~50 MB and the rest are free from GDAL's cache. Downloading the
+archives instead would be ~6.6 TB. Asset URLs are derived from the scene id, so
+the catalogue is not needed here — which matters, because the catalogue host
+blocks some networks while the download host does not.
+
+**Season.** Vegetation hides the mineral signal in SWIR, so scenes are
+preferred from the local dry window — June–September north of the equator,
+December–March south of it, unconstrained within 15° of it. `--season strict`
+refuses out-of-season scenes (and loses the sites that have none);
+`--season off` ignores season entirely.
+
+**One scene per site.** Scene choice is a greedy cover restricted to in-season
+scenes, and each site is then assigned a scene from within that chosen set.
+Choosing per site independently would multiply the scenes to read without
+adding a single chip.
+
+**Masking is not baked in.** `X` is stored exactly as the sensor gave it. All
+five EnMAP quality layers are stored raw per chip (`qmask`), and `valid` is
+derived from whichever of them `--mask-layers` names (default
+`cloud,cloudshadow`). Changing that decision later costs one line at training
+time, not a rebuild. Cloud is measured over the 64×64 patch, not the 30 km
+scene.
+
+Each chip is one `.npz`:
+
+| Key | What it is |
+|---|---|
+| `X` | int16, (bands, 64, 64), reflectance × 1e-4 |
+| `valid` | uint8, 1 where the pixel is usable |
+| `qmask`, `qmask_names`, `patch_frac` | the five quality layers, raw, and how much of the patch each flags |
+| `wavelength` | nm per band; the 1330–1450 nm water-vapour gap is dropped |
+| `minerals`, `mineral_ids` | the label, `;`-separated |
+| `crs_wkt`, `transform`, `chip_px` | the window's grid, so a mask can be rasterized onto these exact pixels |
+| `patch_cloud`, `lat`, `lon`, `scene_id`, `is_mine` | provenance and filters |
+
+### 3. The segmentation subset — `code/03_osm_segmentation.py` (optional)
+
+Keep the chips where OSM maps mining ground, and rasterize those polygons onto
+the chip's own grid as the target mask.
+
+```bash
+python code/03_osm_segmentation.py --stage query --limit 50   # try it
+python code/03_osm_segmentation.py --stage query
+python code/03_osm_segmentation.py --stage masks
+python code/03_osm_segmentation.py --stage index
+```
+
+Queries run one per 0.25° cell rather than per chip, because Overpass is the
+bottleneck and a cell usually holds several chips; cached cells are never
+queried twice. A chip without a mask means nobody mapped that pit, not that
+there is no pit — the masks are positive-only.
 
 ## Setup
 
 ```bash
-python -m venv .venv
-source .venv/bin/activate
+python -m venv .venv && source .venv/bin/activate
 pip install -r requirements.txt
-
-cp .env.example .env
-# edit .env -> ENMAP_USERNAME / ENMAP_PASSWORD
+cp .env.example .env     # then fill it in
 ```
 
-### Authentication (step 01 downloads)
+`.env` needs `ENMAP_USERNAME` / `ENMAP_PASSWORD` (DLR EOC account, for every
+EnMAP read) and `MINDAT_API_KEY` (only to refresh the Mindat dump).
 
-Step 01 downloads EnMAP assets that may require DLR EOC SSO. Credentials are read
-from `.env`:
+## Conventions
 
-```
-ENMAP_USERNAME = your_username
-ENMAP_PASSWORD = your_password
-```
-
-## Run the whole pipeline
-
-```bash
-python run_pipeline.py --mineral magnesite
-```
-
-Useful overrides:
-
-```bash
-# Smaller chip
-python run_pipeline.py --mineral magnesite --buffer-m 750
-
-# Stricter cloud filter, last 2 years only
-python run_pipeline.py --mineral galena --cloud-max 5 \
-    --start 2024-01-01 --end 2025-12-31
-
-# Skip earlier steps if their outputs already exist
-python run_pipeline.py --mineral cuprite --skip-step 00 --skip-step 01
-
-# Use the legacy fixed-pixel chip behavior instead of a meter buffer
-python run_pipeline.py --mineral magnesite --chip-px 128 --chip-size 128
-```
-
-### Running in tmux
-
-If you want the run to survive disconnects:
-
-```bash
-tmux new -s magnesite
-source .venv/bin/activate
-python run_pipeline.py --mineral magnesite --skip-step 00
-```
-
-## Run individual steps
-
-Each script is independently runnable:
-
-```bash
-python 00_crawl_mindat.py --mineral magnesite --resume
-python 01_stac_search_download.py --mineral magnesite --cloud-max 10
-python 02_enmap_process.py --mineral magnesite --keep-only-swir --version 128 --apply-cloud-mask
-python 03_clip_mines.py --mineral magnesite --chip-px 128
-python 04_osm_mask_batch.py --mineral magnesite
-python 05_build_dataset.py --mineral magnesite --chip-size 128
-```
-
-## Use an existing localities CSV (skip the crawl)
-
-If you already have a CSV with `Name`, `lat`, `lon` columns (the included
-`legacy/sample_csvs/magnesite_mines_with_names.csv` does), just drop it at
-the canonical path and skip step 00:
-
-```bash
-mkdir -p data/magnesite
-cp legacy/sample_csvs/magnesite_mines_with_names.csv data/magnesite/localities.csv
-
-python run_pipeline.py --mineral magnesite \
-    --skip-step 00 \
-    --chip-px 128 --chip-size 128 \
-    --keep-only-swir --version 128 --apply-cloud-mask
-```
-
-`--chip-px 128` makes step 03 produce 128x128 chips (instead of the meter
-buffer); `--chip-size 128` makes step 05 enforce that size when packaging.
-
-## Results / Example
-
-The notebook `06_showcase_dataset.ipynb` demonstrates the end result on **one**
-sample from `data/magnesite/dataset/`:
-
-- Loads `manifest.csv`
-- Opens one `.npz` sample (reflectance cube `X`, mask `y`, wavelengths)
-- Plots:
-  - an RGB composite built from bands nearest ~650/560/490 nm
-  - the OSM mask
-  - an overlay (mask on top of RGB)
-
-In the example run shown in the notebook, samples are:
-
-- `X`: `(224, 100, 100)` (224 spectral bands; 100×100 spatial chip)
-- `y`: `(100, 100)` (0/1 mask)
-
-## Loading the dataset
-
-Each `.npz` is self-contained:
-
-```python
-import numpy as np, pandas as pd, torch
-from torch.utils.data import Dataset, DataLoader
-
-manifest = pd.read_csv("data/magnesite/dataset/manifest.csv")
-
-class EnMAPSegDataset(Dataset):
-    def __init__(self, manifest_df):
-        self.rows = manifest_df.reset_index(drop=True)
-    def __len__(self):
-        return len(self.rows)
-    def __getitem__(self, i):
-        r = self.rows.iloc[i]
-        z = np.load(r["npz_path"])
-        X = torch.from_numpy(z["X"])              # (B, H, W) float32
-        y = torch.from_numpy(z["y"]).long()       # (H, W)    0/1
-        return X, y
-
-loader = DataLoader(EnMAPSegDataset(manifest), batch_size=8, shuffle=True)
-```
-
-The manifest's `split` column starts as `unassigned`; fill it in from your
-training code (e.g. group by `mine_name` to avoid leakage).
-
-Steps 02/03/04 also support a `--base-dir` / `--legacy-out-dir` mode that
-mirrors the old standalone-script behavior, for backward compatibility with
-existing data on external drives.
-
-## Notes
-
-- The Mindat crawler is **HTML scraping**: be polite (`--sleep`), respect
-  Mindat's terms of use, and prefer the on-disk cache (`./cache`) on re-runs.
-- Step 01 downloads **one best scene per mine** (lowest cloud cover, then most
-  recent), and enforces cloud/quality filters client-side based on STAC item
-  properties. Tweak `01_stac_search_download.py:best_scene` if you want
-  different selection logic.
-- Step 03 defaults to a **1500 m buffer** around each (lat, lon). The chip is
-  square in CRS units (typically meters), so its pixel size depends on the
-  scene's GSD (~30 m for EnMAP).
-- Step 04 uses OSM tags `landuse=quarry|mine`, `industrial=mining`,
-  `man_made=tailings_pond|tailings|spoil_heap`. Edit `DEFAULT_TAGS` in
-  `04_osm_mask_batch.py` to extend.
+- Paths come from `code/common.py`; nothing hard-codes a directory.
+- A list in a CSV cell is `;`-separated.
+- Every stage is resumable and skips work already on disk, so a killed run is
+  restarted, never restarted from scratch.
+- Reports are written as both JSON and Markdown: the JSON is what the notebooks
+  plot, the Markdown is what gets pasted into an email.
